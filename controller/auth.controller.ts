@@ -1,43 +1,62 @@
-import type { Request, Response } from 'express';
-import bcrypt from 'bcrypt';
+import pkg from '@prisma/client';
+const { PrismaClient } = pkg;
+import * as argon2 from "argon2";
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 
 const prisma = new PrismaClient();
 
-// Zod schema for request validation 
 const RegisterSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
-  name: z.string(), // Bank/Tenant Name
+  name: z.string(), // Bank Name
 });
 
-export const register = async (req: Request, res: Response) => {
+export const register = async (req: any, res: any) => {
   try {
     const { email, password, name } = RegisterSchema.parse(req.body);
 
-    // 1. Create the Tenant (The Bank) [cite: 15]
+    // Create the Tenant (Bank) [cite: 6, 15]
     const tenant = await prisma.tenant.create({
       data: {
         name,
-        apiKey: Buffer.from(Date.now().toString()).toString('base64'), // Unique key [cite: 15]
+        apiKey: Buffer.from(Date.now().toString()).toString('base64'),
       },
     });
 
-    // 2. Hash password and create Admin User 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Hash password with Argon2 
+    const hashedPassword = await argon2.hash(password);
+
     const user = await prisma.user.create({
       data: {
         email,
         password: hashedPassword,
         role: 'ADMIN',
-        tenantId: tenant.id, // Linked to the new Tenant 
+        tenantId: tenant.id,
       },
     });
 
-    res.status(201).json({ message: 'Bank Admin onboarded successfully', tenantId: tenant.id });
+    res.status(201).json({ message: 'Bank Admin onboarded', tenantId: tenant.id });
   } catch (error) {
     res.status(400).json({ error: 'Registration failed' });
   }
+};
+
+export const login = async (req: any, res: any) => {
+  const { email, password } = req.body;
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  
+  // Verify with Argon2 
+  if (!user || !(await argon2.verify(user.password, password))) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  const token = jwt.sign(
+    { userId: user.id, tenantId: user.tenantId, role: user.role },
+    process.env.JWT_SECRET as string,
+    { expiresIn: '8h' }
+  );
+
+  res.json({ token });
 };
