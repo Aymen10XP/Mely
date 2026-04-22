@@ -6,32 +6,63 @@ datasource db {
   provider = "postgresql"
 }
 
+enum ZakatAssetType {
+  gold
+  cash
+  business_assets
+}
+
 model Tenant {
-  id      String   @id @default(uuid())
-  name    String
-  apiKey  String   @unique
-  users   User[]
-  logs    ZakatLog[]
+  id                  String               @id @default(uuid())
+  name                String
+  apiKey              String               @unique
+  users               User[]
+  logs                ZakatLog[]
+  passwordResetTokens PasswordResetToken[]
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  role      String
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id])
-  logs      ZakatLog[]
+  id                  String               @id @default(uuid())
+  email               String
+  password            String
+  role                String
+  tenantId            String
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
+  logs                ZakatLog[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@unique([tenantId, email])
 }
 
 model ZakatLog {
-  id         String   @id @default(uuid())
-  assetType  String   
-  amount     Float
-  calculated Float    
-  userId     String
-  tenantId   String
-  user       User     @relation(fields: [userId], references: [id])
-  tenant     Tenant   @relation(fields: [tenantId], references: [id])
-  createdAt  DateTime @default(now())
+  id          String         @id @default(uuid())
+  assetType   ZakatAssetType
+  amount      Float
+  grossAmount Float
+  deductions  Float          @default(0)
+  nisabAmount Float
+  calculated  Float
+  notes       String?
+  userId      String
+  tenantId    String
+  user        User           @relation(fields: [userId], references: [id])
+  tenant      Tenant         @relation(fields: [tenantId], references: [id])
+  createdAt   DateTime       @default(now())
+
+  @@index([tenantId, userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  userId    String
+  tenantId  String
+  user      User     @relation(fields: [userId], references: [id])
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, userId])
+  @@index([tenantId, expiresAt])
 }
