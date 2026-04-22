@@ -1,12 +1,9 @@
 import { defineConfig } from '@prisma/config';
-import * as dotenv from 'dotenv';
-
-// Manually load the .env file
-dotenv.config();
+import 'dotenv/config'; // Crucial for the CLI to see DATABASE_URL
 
 export default defineConfig({
   datasource: {
-    // Ensuring the URL is treated as a string
-    url: process.env.DATABASE_URL as string,
+    // This connects the schema to your .env variable
+    url: process.env.DATABASE_URL!,
   },
-});
+}); 

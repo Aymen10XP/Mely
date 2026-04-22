@@ -1,10 +1,22 @@
+import 'dotenv/config';
 import pkg from '@prisma/client';
-const { PrismaClient } = pkg;
+
+//const { PrismaClient } = pkg;
 import * as argon2 from "argon2";
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
-const prisma = new PrismaClient();
+import { PrismaClient } from '@prisma/client';
+
+import { PrismaPg } from '@prisma/adapter-pg'; // You may need to install @prisma/adapter-pg and pg
+import pg from 'pg';
+
+// Log this once to make sure your password is actually being read
+console.log("Connecting to:", process.env.DATABASE_URL);
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+const prisma = new PrismaClient({ adapter });
 
 const RegisterSchema = z.object({
   email: z.string().email(),
@@ -37,9 +49,15 @@ export const register = async (req: any, res: any) => {
     });
 
     res.status(201).json({ message: 'Bank Admin onboarded', tenantId: tenant.id });
-  } catch (error) {
-    res.status(400).json({ error: 'Registration failed' });
-  }
+  } catch (error: any) {
+    console.error(error);
+    // This will send the actual error message back to Thunder Client
+    return res.status(400).json({ 
+        error: "Registration failed", 
+        message: error.message,
+        details: error.errors // If it's a Zod validation error
+    });
+}
 };
 
 export const login = async (req: any, res: any) => {
