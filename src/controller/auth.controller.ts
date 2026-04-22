@@ -1,80 +1,188 @@
-import 'dotenv/config';
-import pkg from '@prisma/client';
-
-//const { PrismaClient } = pkg;
-import * as argon2 from "argon2";
+import type { RequestHandler } from 'express';
+import argon2 from 'argon2';
+import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { z } from 'zod';
 
-import { PrismaClient } from '@prisma/client';
+import { env } from '../config/env.js';
+import { prisma } from '../lib/prisma.js';
+import { HttpError } from '../lib/http.js';
+import {
+  forgotPasswordSchema,
+  loginSchema,
+  registerSchema,
+  resetPasswordSchema,
+} from '../schemas/auth.schema.js';
 
-import { PrismaPg } from '@prisma/adapter-pg'; // You may need to install @prisma/adapter-pg and pg
-import pg from 'pg';
+const genericForgotPasswordMessage =
+  'If an account exists for that email and tenant, a reset token has been generated.';
 
-// Log this once to make sure your password is actually being read
-console.log("Connecting to:", process.env.DATABASE_URL);
+const buildResetUrl = (token: string, tenantId: string) => {
+  const baseUrl = env.APP_BASE_URL.replace(/\/$/, '');
+  const params = new URLSearchParams({ token, tenantId });
+  return `${baseUrl}/reset-password?${params.toString()}`;
+};
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+const hashToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
 
-const RegisterSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  name: z.string(), // Bank Name
-});
+const signAuthToken = (payload: { userId: string; tenantId: string; role: string }) =>
+  jwt.sign(payload, env.JWT_SECRET, { expiresIn: '8h' });
 
-export const register = async (req: any, res: any) => {
-  try {
-    const { email, password, name } = RegisterSchema.parse(req.body);
+export const register: RequestHandler = async (req, res) => {
+  const { email, password, name } = registerSchema.parse(req.body);
+  const apiKey = crypto.randomBytes(32).toString('hex');
+  const passwordHash = await argon2.hash(password);
 
-    // Create the Tenant (Bank) [cite: 6, 15]
-    const tenant = await prisma.tenant.create({
+  const created = await prisma.$transaction(async (tx) => {
+    const tenant = await tx.tenant.create({
       data: {
         name,
-        apiKey: Buffer.from(Date.now().toString()).toString('base64'),
+        apiKey,
       },
     });
 
-    // Hash password with Argon2 
-    const hashedPassword = await argon2.hash(password);
-
-    const user = await prisma.user.create({
+    await tx.user.create({
       data: {
         email,
-        password: hashedPassword,
+        password: passwordHash,
         role: 'ADMIN',
         tenantId: tenant.id,
       },
     });
 
-    res.status(201).json({ message: 'Bank Admin onboarded', tenantId: tenant.id });
-  } catch (error: any) {
-    console.error(error);
-    // This will send the actual error message back to Thunder Client
-    return res.status(400).json({ 
-        error: "Registration failed", 
-        message: error.message,
-        details: error.errors // If it's a Zod validation error
-    });
-}
+    return tenant;
+  });
+
+  res.status(201).json({
+    message: 'Bank Admin onboarded',
+    tenantId: created.id,
+    apiKey,
+  });
 };
 
-export const login = async (req: any, res: any) => {
-  const { email, password } = req.body;
+export const login: RequestHandler = async (req, res) => {
+  const { email, password, tenantId } = loginSchema.parse(req.body);
 
-  const user = await prisma.user.findUnique({ where: { email } });
-  
-  // Verify with Argon2 
+  const user = await prisma.user.findUnique({
+    where: {
+      tenantId_email: {
+        tenantId,
+        email,
+      },
+    },
+  });
+
   if (!user || !(await argon2.verify(user.password, password))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+    throw new HttpError(401, 'Invalid credentials');
   }
 
-  const token = jwt.sign(
-    { userId: user.id, tenantId: user.tenantId, role: user.role },
-    process.env.JWT_SECRET as string,
-    { expiresIn: '8h' }
-  );
+  const token = signAuthToken({
+    userId: user.id,
+    tenantId: user.tenantId,
+    role: user.role,
+  });
 
-  res.json({ token });
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      tenantId: user.tenantId,
+    },
+  });
+};
+
+export const forgotPassword: RequestHandler = async (req, res) => {
+  const { email, tenantId } = forgotPasswordSchema.parse(req.body);
+  const resetToken = crypto.randomBytes(32).toString('hex');
+  const resetUrl = buildResetUrl(resetToken, tenantId);
+
+  const user = await prisma.user.findUnique({
+    where: {
+      tenantId_email: {
+        tenantId,
+        email,
+      },
+    },
+  });
+
+  if (user) {
+    const expiresAt = new Date(Date.now() + env.PASSWORD_RESET_TOKEN_TTL_MINUTES * 60_000);
+
+    await prisma.$transaction([
+      prisma.passwordResetToken.deleteMany({
+        where: {
+          userId: user.id,
+          tenantId,
+        },
+      }),
+      prisma.passwordResetToken.create({
+        data: {
+          tokenHash: hashToken(resetToken),
+          expiresAt,
+          userId: user.id,
+          tenantId,
+        },
+      }),
+    ]);
+  }
+
+  res.json({
+    message: genericForgotPasswordMessage,
+    resetToken,
+    resetUrl,
+    expiresInMinutes: env.PASSWORD_RESET_TOKEN_TTL_MINUTES,
+  });
+};
+
+export const resetPassword: RequestHandler = async (req, res) => {
+  const { token, newPassword, tenantId } = resetPasswordSchema.parse(req.body);
+  const tokenHash = hashToken(token);
+
+  const resetToken = await prisma.passwordResetToken.findFirst({
+    where: {
+      tenantId,
+      tokenHash,
+      usedAt: null,
+      expiresAt: {
+        gt: new Date(),
+      },
+    },
+  });
+
+  if (!resetToken) {
+    throw new HttpError(400, 'Reset token is invalid, expired, or already used');
+  }
+
+  const passwordHash = await argon2.hash(newPassword);
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: {
+        id: resetToken.userId,
+      },
+      data: {
+        password: passwordHash,
+      },
+    }),
+    prisma.passwordResetToken.update({
+      where: {
+        id: resetToken.id,
+      },
+      data: {
+        usedAt: new Date(),
+      },
+    }),
+    prisma.passwordResetToken.deleteMany({
+      where: {
+        userId: resetToken.userId,
+        tenantId,
+        id: {
+          not: resetToken.id,
+        },
+      },
+    }),
+  ]);
+
+  res.json({ message: 'Password reset successfully' });
 };

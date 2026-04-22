@@ -1,19 +1,6 @@
-import express from 'express';
+import { env } from './config/env.js';
+import { app } from './app.js';
 
-import { register, login } from './controller/auth.controller';
-import { tenantMiddleware } from './middleware/tenant.middleware';
-
-const app = express();
-app.use(express.json());
-
-// Public Auth Routes
-app.post('/api/auth/register', register);
-app.post('/api/auth/login', login);
-
-// Example Protected Route requiring Multi-Tenancy
-app.get('/api/secure-data', tenantMiddleware, (req, res) => {
-  res.json({ message: 'Access granted', tenantId: (req as any).tenantId });
+app.listen(env.PORT, () => {
+  console.log(`MELY Backend running on port ${env.PORT}`);
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`MELY Backend running on port ${PORT}`));
